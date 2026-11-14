@@ -4,73 +4,123 @@ on:
   workflow_dispatch:
   push:
     paths:
-      - "*.zip"
-      - ".github/workflows/build-apk.yml"
+      - '*.zip'
+      - '**/*.zip'
+      - '.github/workflows/build-apk.yml'
 
 permissions:
   contents: read
 
+concurrency:
+  group: mini-market-apk-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
+    name: Build Android APK
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: Setup Java
+      - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: '17'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
 
-      - name: Extract Game ZIP
+      - name: Install Android SDK
+        shell: bash
         run: |
-          mkdir game
-          ZIP=$(find . -maxdepth 1 -name "*.zip" | head -n 1)
-          test -n "$ZIP"
-          unzip -q "$ZIP" -d game
+          set -euo pipefail
+          SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | sort -V | tail -n 1)"
+          if [ -z "$SDKMANAGER" ]; then
+            echo "sdkmanager not found"
+            exit 1
+          fi
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" --install \
+            'platform-tools' \
+            'platforms;android-34' \
+            'build-tools;34.0.0'
 
-          MAIN=$(find game -name "mini-market-final.html" | head -n 1)
-          test -n "$MAIN"
-
-          ROOT=$(dirname "$MAIN")
-          cp "$MAIN" "$ROOT/index.html"
-
-          echo "GAME_ROOT=$ROOT" >> "$GITHUB_ENV"
-
-      - name: Install Capacitor
+      - name: Extract game ZIP
+        shell: bash
         run: |
-          cd "$GAME_ROOT"
-          npm init -y
-          npm install @capacitor/core@6 @capacitor/android@6
-          npm install -D @capacitor/cli@6
+          set -euo pipefail
+          ZIP_FILE="$(find . -maxdepth 2 -type f -iname '*.zip' -print -quit)"
+          if [ -z "$ZIP_FILE" ]; then
+            echo "ZIP file not found"
+            exit 1
+          fi
 
-          npx cap init "Mini Market Simulator" \
-            "com.wroxlyrcs.minimarketsimulator" \
-            --web-dir=.
+          mkdir -p extracted android-app/www
+          unzip -q "$ZIP_FILE" -d extracted
 
+          MAIN_HTML="$(find extracted -type f -name 'mini-market-final.html' -print -quit)"
+          if [ -z "$MAIN_HTML" ]; then
+            echo "mini-market-final.html not found"
+            find extracted -type f -name '*.html' -print | head -30
+            exit 1
+          fi
+
+          GAME_DIR="$(dirname "$MAIN_HTML")"
+          cp -a "$GAME_DIR"/. android-app/www/
+          cp "$MAIN_HTML" android-app/www/index.html
+          test -s android-app/www/index.html
+
+          cat > android-app/package.json <<'JSON'
+          {
+            "name": "mini-market-simulator-android",
+            "version": "1.0.0",
+            "private": true,
+            "dependencies": {
+              "@capacitor/android": "6.2.1",
+              "@capacitor/core": "6.2.1"
+            },
+            "devDependencies": {
+              "@capacitor/cli": "6.2.1"
+            }
+          }
+          JSON
+
+          cat > android-app/capacitor.config.json <<'JSON'
+          {
+            "appId": "com.wroxlyrcs.minimarketsimulator",
+            "appName": "Mini Market Simulator",
+            "webDir": "www",
+            "bundledWebRuntime": false,
+            "server": {
+              "androidScheme": "https"
+            }
+          }
+          JSON
+
+      - name: Create Android project
+        working-directory: android-app
+        run: |
+          npm install --no-audit --no-fund
           npx cap add android
           npx cap sync android
 
       - name: Build APK
+        working-directory: android-app/android
         run: |
-          cd "$GAME_ROOT/android"
           chmod +x gradlew
-          ./gradlew assembleDebug
+          ./gradlew --no-daemon assembleDebug
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: Mini-Market-Simulator-APK
-          path: ${{ env.GAME_ROOT }}/android/app/build/outputs/apk/debug/app-debug.apk
+          path: android-app/android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
+          retention-days: 14
           
