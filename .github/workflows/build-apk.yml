@@ -1,0 +1,76 @@
+name: Mini Market APK Build
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "*.zip"
+      - ".github/workflows/build-apk.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Extract Game ZIP
+        run: |
+          mkdir game
+          ZIP=$(find . -maxdepth 1 -name "*.zip" | head -n 1)
+          test -n "$ZIP"
+          unzip -q "$ZIP" -d game
+
+          MAIN=$(find game -name "mini-market-final.html" | head -n 1)
+          test -n "$MAIN"
+
+          ROOT=$(dirname "$MAIN")
+          cp "$MAIN" "$ROOT/index.html"
+
+          echo "GAME_ROOT=$ROOT" >> "$GITHUB_ENV"
+
+      - name: Install Capacitor
+        run: |
+          cd "$GAME_ROOT"
+          npm init -y
+          npm install @capacitor/core@6 @capacitor/android@6
+          npm install -D @capacitor/cli@6
+
+          npx cap init "Mini Market Simulator" \
+            "com.wroxlyrcs.minimarketsimulator" \
+            --web-dir=.
+
+          npx cap add android
+          npx cap sync android
+
+      - name: Build APK
+        run: |
+          cd "$GAME_ROOT/android"
+          chmod +x gradlew
+          ./gradlew assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Mini-Market-Simulator-APK
+          path: ${{ env.GAME_ROOT }}/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          
